@@ -1,6 +1,7 @@
 // Core agent loop: one LLM stream per turn, up to 4 tool-use rounds.
 // SSE events: anchors, memory, search, sources, token, done, error.
 
+import "./env.ts";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Response as ExpressResponse } from "express";
 import { buildSystemPrompt } from "./prompt.ts";
@@ -19,7 +20,13 @@ const MAX_ROUNDS = 4;
 const MAX_HISTORY = 30;
 const MODEL = process.env["MODEL"] ?? "claude-sonnet-4-5";
 
-const client = new Anthropic({ apiKey: process.env["ANTHROPIC_API_KEY"] });
+let _client: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_client) {
+    _client = new Anthropic({ apiKey: process.env["ANTHROPIC_API_KEY"] });
+  }
+  return _client;
+}
 
 // SSE helpers
 function sse(res: ExpressResponse, event: string, data: unknown): void {
@@ -181,10 +188,10 @@ export async function runAgent(
     const isLastRound = round === MAX_ROUNDS - 1;
     const tools: Anthropic.Tool[] = isLastRound ? [] : [webSearchTool];
 
-    let stream: Awaited<ReturnType<typeof client.messages.stream>> | null =
+    let stream: Awaited<ReturnType<Anthropic["messages"]["stream"]>> | null =
       null;
     try {
-      stream = client.messages.stream({
+      stream = getClient().messages.stream({
         model: MODEL,
         max_tokens: 2048,
         system: [

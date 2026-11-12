@@ -1,4 +1,5 @@
 // Express server: routes, middleware, rate limiting, env check, security headers.
+import "./env.ts";
 
 import express from "express";
 import path from "node:path";

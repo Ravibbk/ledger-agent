@@ -1,6 +1,7 @@
 // Eval script: seeds history, fires the 3 reviewer prompts, verifies SSE event order.
 // Run with: tsx scripts/eval.ts
 
+import "../src/env.ts";
 import * as http from "node:http";
 import { randomUUID } from "node:crypto";
 
