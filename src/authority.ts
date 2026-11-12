@@ -80,3 +80,4 @@ export function tagAuthority(url: string): AuthorityTag {
   // but we can't know without a vendor list)
   return "other";
 }
+

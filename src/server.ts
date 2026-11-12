@@ -228,3 +228,4 @@ app.post("/api/chat", (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   log.info(`Ledger listening`, { port: PORT });
 });
+
