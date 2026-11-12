@@ -10,3 +10,4 @@ if (fs.existsSync(envPath) && typeof process.loadEnvFile === "function") {
     // ignore parse errors
   }
 }
+
