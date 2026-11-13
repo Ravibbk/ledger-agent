@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "vite build web",
+    "postinstall": "npm run build",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "test": "tsx --test tests/*.test.ts",

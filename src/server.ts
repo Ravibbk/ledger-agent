@@ -2,6 +2,7 @@
 import "./env.ts";
 
 import express from "express";
+import * as fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent } from "./agent.ts";
@@ -244,10 +245,27 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, "..", "web", "dist");
+    const indexPath = path.join(distPath, "index.html");
+
+    // Fallback: auto-build if dist does not exist
+    if (!fs.existsSync(indexPath)) {
+      try {
+        log.warn("web/dist/index.html not found, running build...");
+        const { execSync } = await import("node:child_process");
+        execSync("npx vite build web", { stdio: "inherit" });
+      } catch (e) {
+        log.error("Failed to build web on startup", { error: String(e) });
+      }
+    }
+
     app.use(express.static(distPath));
     app.get("*", (req, res, next) => {
       if (req.path.startsWith("/api") || req.path === "/healthz") return next();
-      res.sendFile(path.join(distPath, "index.html"));
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(503).send("Application frontend is building. Please refresh in a moment.");
+      }
     });
   }
 
