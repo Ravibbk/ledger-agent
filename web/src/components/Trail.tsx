@@ -37,3 +37,4 @@ export function Trail({ events }: TrailProps) {
     </div>
   );
 }
+

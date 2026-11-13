@@ -50,3 +50,4 @@ describe("parseCitationSegments", () => {
     assert.equal(segments[1]?.source, undefined);
   });
 });
+
