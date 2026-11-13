@@ -1,78 +1,72 @@
 # Ledger – Design
 
-Ledger is a chat agent with one job: answer questions about things that change over time, while remembering what you said last week.
+Ledger is a voice-enabled chat agent with one tool: web search. It answers questions about things that change over time, remembers past conversations by date, and allows users to either type or speak naturally.
 
 ## Premise
 
-Most chat agents fail at two things: they don't know what day it is (relative to you), and they don't remember what you asked yesterday. Ledger fixes both in code, not in the model, so the model can focus on reading search results and writing clear prose.
+Most chat agents fail at three things: they do not know what day it is relative to the user, they lose track of earlier conversations, and they bolt on complex voice pipelines with extra latency and API costs. Ledger solves time and memory in deterministic code, uses the browser's native Web Speech API for voice (zero extra API keys or audio streaming latency), and leaves the model to do what it does best: search, compare facts, and write clear language.
 
 ## How a turn works
 
-1. **Date anchoring.** The server receives the user's message and their timezone offset. chrono-node parses natural-language date references ("last Tuesday", "on 3 November", "on Monday") against the exact request timestamp. All resolution is code – weekday arithmetic, past-only enforcement, fallback candidates. The model is handed `<time_anchors>` and told to trust them.
-
-2. **Memory recall.** The resolved calendar days are used to scan every session file for messages sent on those days (in the user's timezone). Up to 14 messages, capped at 1,400 chars each, are injected as `<recalled_history>` with a note that "the world may have moved since." If nothing is found, the model is told so explicitly and forbidden from inventing prior content.
-
-3. **User message saved.** The user message is written to disk atomically (temp file + rename) before any model call, so it is never lost even if the stream fails.
-
-4. **Streaming tool loop.** One `client.messages.stream` call per round, forwarding tokens over SSE immediately. The model runs up to 4 rounds; the final round has no tools so the model must write its answer. Tool calls within a round run concurrently.
-
-5. **web_search.** The only tool. Tavily REST with parallel queries, 8s timeout, one retry, 10-minute cache, URL-level deduplication, continuous source numbering across rounds, and authority tagging (official/press/other) by domain heuristics. Results are wrapped in `<search_results>` and marked as untrusted data.
-
-6. **Response saved and SSE closed.** The assistant response is appended to the session file with its sources. The `done` event carries timestamps, source list, and stats.
+1. **Input capture & speech-to-text.** The user types in the composer or taps the mic (or uses hands-free mode). The browser's native SpeechRecognition streams live interim transcripts directly into the textarea. On final recognition, the text is committed or auto-sent.
+2. **Date anchoring.** The request arrives at `/api/chat` with the message text and the user's client timezone offset (`Date#getTimezoneOffset()`). chrono-node resolves natural-language references ("last Tuesday", "on 3 November", "third November", "on Monday") strictly to PAST calendar days relative to the request instant. Weekday math and spoken ordinals ("third" -> "3rd") are normalized in code. Output is passed to the model as `<time_anchors>`, which the model is instructed to trust over its own internal date math.
+3. **Memory recall.** For each anchored day (and fallback day if applicable), the server scans all session JSON files in `data/sessions/` for messages that occurred on that local calendar day. Recalled messages are capped (~14 messages, ~1,400 chars each) and injected as `<recalled_history>` with an explicit note that the world may have moved since. If no record exists, the model is forbidden from inventing prior context.
+4. **User message persistence.** The user message is saved to disk atomically (temp file + rename) BEFORE calling the LLM, ensuring zero lost input even on disconnect.
+5. **Streaming LLM loop.** A single stream (`client.messages.stream`) with prompt caching on the system prompt. Up to 4 rounds. Tool calls in each round execute concurrently. The final round disables tools to guarantee an answer.
+6. **The one tool: web_search.** Queries run in parallel against Tavily REST with an 8-second timeout, one backoff retry, 10-minute in-memory cache, URL deduplication, and continuous source numbering (`[1]`, `[2]`). Domains are tagged for authority (official vendor domains, `/pricing`, `/changelog`, docs vs press/review sites). Results are marked as `UNTRUSTED DATA` so instructions inside cannot hijack the prompt.
+7. **SSE delivery & client rendering.** Events stream over SSE: `anchors`, `memory`, `search`, `sources`, `token`, and `done`. React throttles incoming token renders using `requestAnimationFrame`. Citations (`[n]`) are parsed into clickable superscript anchors without `dangerouslySetInnerHTML`.
+8. **Speech synthesis & hands-free loop.** If voice mode, auto-read, or hands-free is enabled, `speechText.ts` cleans citations, URLs, and markdown formatting, spells arrows ("->" as "to"), chunks text at sentence boundaries to avoid browser synthesis cut-offs, and speaks the answer. In hands-free mode, the mic automatically reactivates after speaking finishes.
 
 ## Why it is fast
 
-- **Parallel queries:** multiple search strings execute concurrently in a single tool round.
-- **Cache:** repeated queries within 10 minutes hit memory, not the network.
-- **Prompt caching:** the system prompt is sent in a `cache_control: ephemeral` block, so Anthropic charges one cached read on subsequent rounds.
-- **Snippet cap:** search snippets are truncated at 650 chars, keeping context short and cheap.
-- **Single LLM stream:** no planner, no critic, no second model call. One stream, forwarded immediately.
+- **Parallel search queries:** up to 3 queries execute concurrently in a single tool call round.
+- **Short answers in voice mode:** the model is instructed to keep answers under ~120 words when voice is active so users aren't trapped listening to long text.
+- **Prompt caching:** Anthropic's ephemeral cache header reduces time-to-first-token on subsequent turns.
+- **Client-side Web Speech API:** Speech recognition and speech synthesis occur entirely inside the browser without transmitting audio bytes to a third-party server.
+- **Single LLM stream:** no multi-agent planner/critic handoffs or roundtrips.
 
 ## Why it is correct
 
-- **Dates from code:** chrono-node with the real request time and the client's UTC offset. The model is prohibited from doing date math.
-- **`since` filter:** when checking "has X changed," the date anchor is passed as Tavily's `start_published_date`, excluding stale results.
-- **Official-source preference:** the system prompt instructs the model to prefer `/pricing`, `/changelog`, `docs.*`, and `blog.*` over review sites and aggregators.
-- **Claim re-verification:** for "is my earlier answer still correct," the model lists time-sensitive claims and re-searches each one.
-- **Conflict and "no change found" rules:** the model is told never to say "nothing changed" when it merely found no evidence of change. If sources conflict, prefer the most recent official one and state the disagreement.
+- **Dates from code:** the model never computes relative dates; calendar resolution happens via chrono-node with client timezone offsets and spoken ordinal normalization.
+- **`since` filter:** "Has X changed since" passes the anchored date directly to Tavily's `start_published_date`.
+- **Evidence hierarchy:** official pricing pages, docs, and changelogs are prioritized over third-party review sites.
+- **Honest negatives:** the model is strictly forbidden from writing "nothing changed" when evidence was merely missing; it must say "no change found" or "could not verify."
 
 ## Safety
 
-- Search results are `UNTRUSTED DATA`, wrapped in `<search_results>` with an XML comment instructing the model to ignore instructions inside.
-- Session IDs are validated against `/^[a-zA-Z0-9_-]{1,64}$/` before any file access.
-- Request bodies are validated for type, length (message ≤ 4,000 chars), and array size.
-- In-memory per-IP rate limit: 20 chat requests per minute.
-- Same-origin security headers; no wildcard CORS.
+- Search snippets are treated as untrusted data and wrapped in `<search_results>` with prompt injection warnings.
+- Session IDs are validated against `/^[a-zA-Z0-9_-]{1,64}$/` to prevent path traversal.
+- Request body limits, IP rate limiting (20 req/min), same-origin headers, and `Permissions-Policy: microphone=(self)`.
 
 ## Zero-friction run
 
-```
-cp .env.example .env   # fill in two keys
-npm install
-npm run dev            # tsx watch src/server.ts
-```
+- One command: `npm run dev` starts the Express server with Vite middleware in development mode with hot module reloading.
+- Zero extra keys: voice uses the standard Web Speech API built into modern browsers.
 
 ## Considered and rejected
 
-- **Provider-native search** (Claude's built-in tool): gives less control over caching, retries, deduplication, and the `since` filter.
-- **Memory as a second tool**: letting the model decide when to recall breaks the invariant that recall always precedes the model call; it also costs an extra round.
-- **Planner/critic multi-agent**: adds latency and complexity without improving correctness for single-query tasks.
-- **Vector/hybrid memory**: overkill for the access pattern (lookup by exact calendar day).
-- **Full page fetching**: snippets are sufficient for pricing and changelog checks; full pages would blow the context budget.
-- **React + DB stack**: a single HTML file with vanilla JS and JSON files on disk is enough, deployable on a free tier with no build step.
+- **Provider-native search:** less control over request timeouts, retries, deduplication, and the `since` date filter.
+- **Memory as a second tool:** breaks the invariant that memory recall must occur before reasoning, and burns an extra LLM turn.
+- **Planner/critic multi-agent:** increases latency and cost without improving answer accuracy for search-and-compare tasks.
+- **Vector/hybrid memory:** unnecessary complexity and storage overhead for exact calendar day queries.
+- **Full page fetching:** snippet inspection is sufficient for pricing/version checks and respects latency budgets.
+- **Server-side Whisper/cloud TTS:** adds latency, streaming complexity, and separate API billing; Web Speech API provides instant client-side dictation and synthesis.
+- **Next.js / separate frontend service:** running Vite middleware directly inside Express keeps the entire application as a single deployable unit on free-tier hosting.
 
 ## Known limits
 
-- **Shallow snippets:** Tavily's basic depth returns snippets, not full pages. A pricing page behind a login wall will not be retrieved.
-- **Missing publish dates:** many results have no `published_date`; the model must judge recency from context clues.
-- **Ephemeral free-tier disk:** Render's free plan resets the filesystem on each deploy. Conversations are lost. Use a persistent disk (`/opt/render/project/src/data`, paid plan) or export sessions before deploying.
-- **No authentication:** any visitor can read and seed sessions by ID.
+- **Shallow snippets:** Tavily basic depth returns snippets; pages gated behind authentication cannot be read.
+- **Missing publish dates:** some pages lack published date headers; model must infer recency from context.
+- **Web Speech browser support:** supported in Chrome, Edge, Safari; Firefox does not implement `SpeechRecognition`. Speech accuracy varies by accent and background noise.
+- **Ephemeral free-tier disk:** Render free tier resets local files on redeploy. Persistent storage requires a disk mount at `/opt/render/project/src/data`.
+- **No authentication:** sessions are addressable by ID.
 
 ## With another week
 
-- **Eval harness with dated fixtures:** replay seeded sessions against a local server with a fixed clock to catch regressions without real API calls.
-- **Speculative page fetch:** for the top official result, fetch the full page and extract the pricing section, falling back to the snippet on failure.
-- **Persisted structured claims:** after a "has X changed" answer, extract and store the verified claim (`{item, value, asOf}`) so a future "is it still correct?" diff can compare structured data, not prose.
-- **SQLite + auth:** replace JSON files with SQLite for concurrent writes; add a simple session-cookie login so conversations are private.
-- **Source trust weights + confidence line:** score sources on recency × authority; show a one-line confidence indicator ("High – two official pages agree") under time-sensitive answers.
-
+- **Eval harness with dated fixtures:** replay recorded session states against fixed clocks for deterministic regression testing.
+- **Server-side STT fallback:** Whisper fallback for browsers without Web Speech support (e.g. Firefox).
+- **Streaming TTS:** synthesize sentences while tokens stream instead of waiting for turn completion.
+- **Speculative page fetch:** fetch full HTML for top official results when snippets lack price numbers.
+- **Persisted structured claims:** extract verified claims (`{ item, price, date }`) to enable diff comparisons on future turns.
+- **SQLite + user auth:** replace JSON files with SQLite and session cookies.
+- **Source trust weights & confidence meter:** display an indicator of agreement across official sources.

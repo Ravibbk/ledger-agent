@@ -3,7 +3,7 @@ services:
     name: ledger-agent
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
@@ -11,6 +11,7 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
+      - key: NODE_ENV
+        value: production
       - key: NODE_VERSION
         value: 22
-
