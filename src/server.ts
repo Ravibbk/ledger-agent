@@ -1,10 +1,9 @@
-// Express server: routes, middleware, rate limiting, env check, security headers.
+// Express server: routes, middleware, rate limiting, env check, security headers, Vite integration.
 import "./env.ts";
 
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
 import { runAgent } from "./agent.ts";
 import {
   validateSessionId,
@@ -29,13 +28,17 @@ if (missing.length > 0) {
 const app = express();
 const PORT = parseInt(process.env["PORT"] ?? "3000", 10);
 
-// --- Security headers (same-origin, no wildcard CORS) ---
-app.use((req, res, next) => {
+// --- Security headers (same-origin, no wildcard CORS, allow microphone) ---
+app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("X-XSS-Protection", "1; mode=block");
   res.setHeader("Referrer-Policy", "same-origin");
-  res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss:;"
+  );
+  res.setHeader("Permissions-Policy", "microphone=(self)");
   next();
 });
 
@@ -74,11 +77,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- Body parsing (4000 char limit enforced per-route) ---
+// --- Body parsing (32kb limit) ---
 app.use(express.json({ limit: "32kb" }));
-
-// --- Static files ---
-app.use(express.static(path.join(__dirname, "..", "public")));
 
 // --- Health check ---
 app.get("/healthz", (_req, res) => {
@@ -89,7 +89,7 @@ app.get("/healthz", (_req, res) => {
 app.get("/api/sessions", (_req, res) => {
   try {
     res.json(listSessions());
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to list sessions." });
   }
 });
@@ -104,7 +104,7 @@ app.get("/api/sessions/:id", (req, res) => {
   try {
     const session = loadSession(id);
     res.json(session);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Failed to load session." });
   }
 });
@@ -147,14 +147,19 @@ app.post("/api/seed", (req, res) => {
     const storedMsgs: StoredMessage[] = [];
     for (const m of messages) {
       if (typeof m !== "object" || m === null) continue;
-      const { role, content, at } = m as Record<string, unknown>;
+      const { role, content, at, via } = m as Record<string, unknown>;
       if (
         (role !== "user" && role !== "assistant") ||
         typeof content !== "string" ||
         typeof at !== "string"
       )
         continue;
-      storedMsgs.push({ role, content, at });
+      storedMsgs.push({
+        role,
+        content,
+        at,
+        via: via === "voice" || via === "text" ? via : undefined,
+      });
     }
 
     saveSession({ id: sessionId, messages: storedMsgs });
@@ -178,7 +183,7 @@ app.post("/api/chat", (req, res) => {
   }
 
   const body = req.body as Record<string, unknown>;
-  const { sessionId, message, tzOffset } = body;
+  const { sessionId, message, tzOffset, via } = body;
 
   if (!validateSessionId(sessionId)) {
     res.status(400).json({ error: "Invalid or missing sessionId." });
@@ -197,7 +202,8 @@ app.post("/api/chat", (req, res) => {
       ? Math.round(tzOffset)
       : 0;
 
-  const reqId = (req as unknown as Record<string, unknown>)["reqId"] as string ?? newReqId();
+  const reqId = ((req as unknown as Record<string, unknown>)["reqId"] as string) ?? newReqId();
+  const viaMode = via === "voice" ? "voice" : "text";
 
   // Set up SSE
   res.setHeader("Content-Type", "text/event-stream");
@@ -210,7 +216,7 @@ app.post("/api/chat", (req, res) => {
   req.on("close", () => controller.abort());
 
   runAgent(
-    { sessionId, message: message.trim(), tzOffset: tzOff, reqId },
+    { sessionId, message: message.trim(), tzOffset: tzOff, reqId, via: viaMode },
     res,
     controller.signal
   )
@@ -225,8 +231,32 @@ app.post("/api/chat", (req, res) => {
     });
 });
 
-// --- Start ---
-app.listen(PORT, "0.0.0.0", () => {
-  log.info(`Ledger listening`, { port: PORT });
-});
+// --- Start server and mount frontend (Vite in dev, static dist in prod) ---
+async function startServer() {
+  const isProd = process.env["NODE_ENV"] === "production";
+  if (!isProd) {
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+      root: path.join(__dirname, "..", "web"),
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(__dirname, "..", "web", "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res, next) => {
+      if (req.path.startsWith("/api") || req.path === "/healthz") return next();
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
 
+  app.listen(PORT, "0.0.0.0", () => {
+    log.info(`Ledger listening`, { port: PORT, env: isProd ? "production" : "development" });
+  });
+}
+
+startServer().catch((err) => {
+  log.error("Server startup failed", { error: String(err) });
+  process.exit(1);
+});

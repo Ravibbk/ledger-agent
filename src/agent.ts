@@ -55,6 +55,7 @@ export interface AgentRequest {
   message: string;
   tzOffset: number; // minutes, as Date.getTimezoneOffset()
   reqId: string;
+  via?: "voice" | "text";
 }
 
 const webSearchTool: Anthropic.Tool = {
@@ -125,6 +126,7 @@ export async function runAgent(
     role: "user",
     content: req.message,
     at: userAt,
+    via: req.via ?? "text",
   });
 
   // 4. Build the conversation history (last MAX_HISTORY messages)
@@ -180,7 +182,8 @@ export async function runAgent(
   let firstTokenMs: number | null = null;
   let assistantText = "";
 
-  const systemPrompt = buildSystemPrompt(nowIso);
+  const isVoice = req.via === "voice";
+  const systemPrompt = buildSystemPrompt(nowIso, isVoice);
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     if (signal.aborted) break;
