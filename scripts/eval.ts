@@ -5,7 +5,8 @@ import "../src/env.ts";
 import * as http from "node:http";
 import { randomUUID } from "node:crypto";
 
-const BASE_URL = process.env["EVAL_BASE_URL"] ?? "http://localhost:3000";
+const PORT = process.env["PORT"] ?? "3000";
+const BASE_URL = process.env["EVAL_BASE_URL"] ?? `http://localhost:${PORT}`;
 const TZ_OFFSET = -330; // IST
 
 // --- Helpers ---
