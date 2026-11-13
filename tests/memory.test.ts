@@ -1,9 +1,9 @@
-// Unit tests for memory.ts – date anchoring, recall, session validation.
+// Unit tests for memory.ts – date anchoring, spoken dates, recall, session validation.
 // Uses node:test built-in runner.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resolveAnchors, validateSessionId } from "../src/memory.ts";
+import { resolveAnchors, validateSessionId, normalizeSpokenDates } from "../src/memory.ts";
 
 // Test reference: now = 2026-11-12T03:22:12Z (which is 2026-11-12 08:52 IST, offset -330)
 // IST = UTC+5:30, so tzOffset = -330 (Date.getTimezoneOffset() returns negative for east)
@@ -21,6 +21,20 @@ describe("resolveAnchors", () => {
 
   it("resolves 'on 3 November' to 2026-11-03", () => {
     const { anchors } = resolveAnchors("What did I ask you on 3 November?", NOW_MS, TZ_OFFSET);
+    assert.ok(anchors.length > 0, "should have at least one anchor");
+    const nov3 = anchors.find((a) => a.day === "2026-11-03");
+    assert.ok(nov3, `expected 2026-11-03, got: ${JSON.stringify(anchors)}`);
+  });
+
+  it("resolves spoken 'third November' to 2026-11-03", () => {
+    const { anchors } = resolveAnchors("What did I ask you on third November?", NOW_MS, TZ_OFFSET);
+    assert.ok(anchors.length > 0, "should have at least one anchor");
+    const nov3 = anchors.find((a) => a.day === "2026-11-03");
+    assert.ok(nov3, `expected 2026-11-03, got: ${JSON.stringify(anchors)}`);
+  });
+
+  it("resolves spoken 'November 3rd' to 2026-11-03", () => {
+    const { anchors } = resolveAnchors("What did I ask you on November 3rd?", NOW_MS, TZ_OFFSET);
     assert.ok(anchors.length > 0, "should have at least one anchor");
     const nov3 = anchors.find((a) => a.day === "2026-11-03");
     assert.ok(nov3, `expected 2026-11-03, got: ${JSON.stringify(anchors)}`);
@@ -45,6 +59,14 @@ describe("resolveAnchors", () => {
   it("returns empty array for plain text with no date refs", () => {
     const { anchors } = resolveAnchors("What is 2 + 2?", NOW_MS, TZ_OFFSET);
     assert.equal(anchors.length, 0);
+  });
+});
+
+describe("normalizeSpokenDates", () => {
+  it("normalizes word ordinals to numeric ordinals", () => {
+    assert.equal(normalizeSpokenDates("first of May"), "1st May");
+    assert.equal(normalizeSpokenDates("third November"), "3rd November");
+    assert.equal(normalizeSpokenDates("twenty first of October"), "21st October");
   });
 });
 
@@ -76,4 +98,3 @@ describe("validateSessionId", () => {
     assert.ok(!validateSessionId(undefined));
   });
 });
-

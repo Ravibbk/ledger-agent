@@ -4,7 +4,6 @@
 import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -22,6 +21,7 @@ export interface StoredMessage {
   content: string;
   at: string; // ISO 8601
   sources?: Array<{ index: number; url: string; title: string }>;
+  via?: "voice" | "text";
 }
 
 export interface Session {
@@ -40,6 +40,52 @@ export interface RecalledHistory {
   messages: StoredMessage[];
   daysCovered: string[];
   count: number;
+}
+
+// --- Spoken date normalization ---
+
+const ORDINAL_MAP: Array<[RegExp, string]> = [
+  [/\bthirty[- ]first\b/gi, "31st"],
+  [/\bthirtieth\b/gi, "30th"],
+  [/\btwenty[- ]ninth\b/gi, "29th"],
+  [/\btwenty[- ]eighth\b/gi, "28th"],
+  [/\btwenty[- ]seventh\b/gi, "27th"],
+  [/\btwenty[- ]sixth\b/gi, "26th"],
+  [/\btwenty[- ]fifth\b/gi, "25th"],
+  [/\btwenty[- ]fourth\b/gi, "24th"],
+  [/\btwenty[- ]third\b/gi, "23rd"],
+  [/\btwenty[- ]second\b/gi, "22nd"],
+  [/\btwenty[- ]first\b/gi, "21st"],
+  [/\btwentieth\b/gi, "20th"],
+  [/\bnineteenth\b/gi, "19th"],
+  [/\beighteenth\b/gi, "18th"],
+  [/\bseventeenth\b/gi, "17th"],
+  [/\bsixteenth\b/gi, "16th"],
+  [/\bfifteenth\b/gi, "15th"],
+  [/\bfourteenth\b/gi, "14th"],
+  [/\bthirteenth\b/gi, "13th"],
+  [/\btwelfth\b/gi, "12th"],
+  [/\beleventh\b/gi, "11th"],
+  [/\btenth\b/gi, "10th"],
+  [/\bninth\b/gi, "9th"],
+  [/\beighth\b/gi, "8th"],
+  [/\bseventh\b/gi, "7th"],
+  [/\bsixth\b/gi, "6th"],
+  [/\bfifth\b/gi, "5th"],
+  [/\bfourth\b/gi, "4th"],
+  [/\bthird\b/gi, "3rd"],
+  [/\bsecond\b/gi, "2nd"],
+  [/\bfirst\b/gi, "1st"],
+];
+
+export function normalizeSpokenDates(text: string): string {
+  let normalized = text;
+  for (const [pattern, replacement] of ORDINAL_MAP) {
+    normalized = normalized.replace(pattern, replacement);
+  }
+  // Normalise patterns like "3rd of November" -> "3rd November"
+  normalized = normalized.replace(/(\b\d{1,2}(?:st|nd|rd|th))\s+of\s+([a-zA-Z]+)/gi, "$1 $2");
+  return normalized;
 }
 
 // --- Session ID validation ---
@@ -73,7 +119,7 @@ export function loadSession(id: string): Session {
 export function saveSession(session: Session): void {
   ensureDataDir();
   const p = sessionPath(session.id);
-  const tmp = p + `.tmp.${process.pid}`;
+  const tmp = p + `.tmp.${process.pid}.${Date.now()}`;
   fs.writeFileSync(tmp, JSON.stringify(session, null, 2), "utf8");
   fs.renameSync(tmp, p);
 }
@@ -112,18 +158,7 @@ export function listSessions(): Array<{
 
 // --- Date anchoring ---
 
-// Convert tzOffset (minutes, as Date.getTimezoneOffset() returns) to a Date
-// in that timezone at midnight of a given YYYY-MM-DD.
-function toLocalDate(day: string, tzOffsetMinutes: number): Date {
-  // Parse the day as UTC midnight, then adjust by tzOffset
-  const utc = new Date(`${day}T00:00:00Z`);
-  // tzOffset is positive for west of UTC, negative for east
-  utc.setUTCMinutes(utc.getUTCMinutes() + tzOffsetMinutes);
-  return utc;
-}
-
 function formatDay(d: Date, tzOffsetMinutes: number): string {
-  // Convert UTC date to local date in the given tz
   const local = new Date(d.getTime() - tzOffsetMinutes * 60_000);
   const y = local.getUTCFullYear();
   const m = String(local.getUTCMonth() + 1).padStart(2, "0");
@@ -131,19 +166,15 @@ function formatDay(d: Date, tzOffsetMinutes: number): string {
   return `${y}-${m}-${dd}`;
 }
 
-// Return the most recent past weekday (0=Sun, 1=Mon... 6=Sat) relative to now,
-// excluding today if it matches, and the alternate (one week earlier).
 function lastWeekday(
   targetWeekday: number,
   now: Date,
   tzOffsetMinutes: number
 ): { primary: Date; alternate: Date } {
-  // Convert now to local date
   const localNow = new Date(now.getTime() - tzOffsetMinutes * 60_000);
   const localWeekday = localNow.getUTCDay();
 
   let daysBack = (localWeekday - targetWeekday + 7) % 7;
-  // If daysBack == 0, the target is today; we want the PAST occurrence so go back 7
   if (daysBack === 0) daysBack = 7;
 
   const primary = new Date(localNow);
@@ -153,7 +184,6 @@ function lastWeekday(
   const alternate = new Date(primary);
   alternate.setUTCDate(alternate.getUTCDate() - 7);
 
-  // Convert back to UTC for consistent storage
   const toUtc = (d: Date) => new Date(d.getTime() + tzOffsetMinutes * 60_000);
   return { primary: toUtc(primary), alternate: toUtc(alternate) };
 }
@@ -175,7 +205,6 @@ const WEEKDAY_NAMES: Record<string, number> = {
   sat: 6,
 };
 
-// Detect "last <weekday>" patterns before passing to chrono
 function extractLastWeekday(text: string): number | null {
   const m = text
     .toLowerCase()
@@ -191,24 +220,21 @@ export interface AnchorResult {
   anchors: TimeAnchor[];
 }
 
-// Resolve natural-language time references in text to calendar days.
-// nowMs: epoch ms at request time. tzOffset: minutes (Date.getTimezoneOffset()).
 export function resolveAnchors(
-  text: string,
+  rawText: string,
   nowMs: number,
-  tzOffset: number // minutes, positive = west of UTC
+  tzOffset: number
 ): AnchorResult {
+  const text = normalizeSpokenDates(rawText);
   const now = new Date(nowMs);
   const anchors: TimeAnchor[] = [];
 
-  // Check for "last <weekday>" first
   const lastWd = extractLastWeekday(text);
   if (lastWd !== null) {
     const { primary, alternate } = lastWeekday(lastWd, now, tzOffset);
     const primaryDay = formatDay(primary, tzOffset);
     const alternateDay = formatDay(alternate, tzOffset);
 
-    // Find the weekday name from text
     const wdMatch = text
       .toLowerCase()
       .match(/\b(?:last|this past)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b/);
@@ -221,46 +247,36 @@ export function resolveAnchors(
     });
   }
 
-  // Also try chrono for other date references, but filter out weekday-only
-  // expressions already handled above
   const chronoRef = new Date(nowMs);
   const parsed = chrono.parse(text, chronoRef, { forwardDate: false });
 
   for (const result of parsed) {
     const matchText = result.text.toLowerCase().trim();
 
-    // Skip if already handled as "last <weekday>"
     if (lastWd !== null && matchText.includes("last")) continue;
 
     let date = result.start.date();
 
-    // Resolve to PAST only
     if (date > now) {
-      // Check if it's a weekday-only reference (no month specified)
       const hasMonth = result.start.isCertain("month");
       const hasYear = result.start.isCertain("year");
       if (!hasMonth && !hasYear) {
-        // Go back one week
         date = new Date(date.getTime() - 7 * 24 * 60 * 60 * 1_000);
       } else if (hasMonth && !hasYear) {
-        // Go back one year
         date = new Date(date);
         date.setFullYear(date.getFullYear() - 1);
       }
     }
 
-    // Still in the future? Skip.
     if (date > now) continue;
 
     const day = formatDay(date, tzOffset);
 
-    // Avoid duplicates
     if (!anchors.some((a) => a.day === day)) {
       anchors.push({ text: result.text, day });
     }
   }
 
-  // Also handle bare "On Monday" (without "last") as most recent past
   if (anchors.length === 0 || (lastWd === null && !parsed.length)) {
     const onWeekdayMatch = text
       .toLowerCase()
@@ -288,7 +304,6 @@ function messageDay(msg: StoredMessage, tzOffset: number): string {
   return formatDay(d, tzOffset);
 }
 
-// Scan ALL session files for messages on the given days, in the user's tz.
 export function recallByDays(
   days: string[],
   tzOffset: number
@@ -309,10 +324,8 @@ export function recallByDays(
     }
   }
 
-  // Sort by time
   matched.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
-  // Cap at MAX_RECALL_MESSAGES and MAX_RECALL_CHARS each
   const capped: StoredMessage[] = [];
   for (const msg of matched.slice(0, MAX_RECALL_MESSAGES)) {
     capped.push({
@@ -330,4 +343,3 @@ export function recallByDays(
     count: capped.length,
   };
 }
-
